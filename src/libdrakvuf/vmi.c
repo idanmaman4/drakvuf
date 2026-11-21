@@ -190,6 +190,14 @@ void process_free_requests(drakvuf_t drakvuf)
     addr_t* key = NULL;
     struct free_trap_wrapper* free_wrapper = NULL;
 
+    /*
+     * Runs after every VM event; almost always nothing was queued for removal.
+     * Skip the destroy + re-create of the (empty) table, which is several
+     * allocator round trips per event.
+     */
+    if ( !g_hash_table_size(drakvuf->remove_traps) )
+        return;
+
     ghashtable_foreach(drakvuf->remove_traps, i, key, free_wrapper)
     {
         remove_trap(drakvuf, free_wrapper->trap);
