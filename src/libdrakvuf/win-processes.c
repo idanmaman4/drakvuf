@@ -1187,6 +1187,14 @@ addr_t win_get_wow_peb( drakvuf_t drakvuf, access_context_t* ctx, addr_t eproces
 
     if ( vmi_read_addr_va( drakvuf->vmi, eprocess_wow64_addr, 0, &wow_process ) == VMI_SUCCESS )
     {
+        /*
+         * A native process has no EWOW64PROCESS: dereferencing NULL + PEB offset
+         * is a page walk that can only fail (user page 0 is never mapped), and
+         * it ran for every 64-bit process on every VM event.
+         */
+        if ( !wow_process )
+            return 0;
+
         if ( vmi_get_winver( drakvuf->vmi ) == VMI_OS_WINDOWS_10 )
         {
             ctx->addr = wow_process + drakvuf->offsets[EWOW64PROCESS_PEB] ;
