@@ -231,6 +231,16 @@ private:
 using hook_filter_t = std::function<bool(const plugin_target_config_entry_t&)>;
 
 /**
+ * Decides whether libusermode tracks a process's DLL loads (the NtMapViewOfSection /
+ * NtProtectVirtualMemory return traps and the DLL inspection behind them). Both syscalls
+ * are trapped for every process; for one the filter rejects, the entry trap returns at
+ * once instead of planting a return breakpoint and inspecting the mapping, which is most
+ * of the cost when a busy process (a .NET JIT, say) calls them thousands of times.
+ * DLLs that process loads are then not hooked through it. ntdll hooking is unaffected.
+ */
+using userhook_process_filter_t = std::function<bool(drakvuf_t, drakvuf_trap_info_t*)>;
+
+/**
  * Userhooks are not supported on some windows versions yet, therefore
  * this function should be called first before using any other function
  * from libuserhook library.
@@ -242,6 +252,12 @@ bool drakvuf_are_userhooks_supported(drakvuf_t drakvuf);
 void drakvuf_register_usermode_callback(drakvuf_t drakvuf, usermode_cb_registration* reg);
 bool drakvuf_request_usermode_hook(drakvuf_t drakvuf, const dll_view_t* dll, const plugin_target_config_entry_t* target, callback_t callback, void* extra);
 void drakvuf_load_dll_hook_config(drakvuf_t drakvuf, const char* dll_hooks_list_path, const bool print_no_addr, const hook_filter_t& hook_filter, wanted_hooks_t& wanted_hooks);
+
+/**
+ * Restrict DLL-load tracking to processes @p filter admits (see userhook_process_filter_t).
+ * An empty filter (the default) tracks every process.
+ */
+void drakvuf_set_userhook_process_filter(drakvuf_t drakvuf, userhook_process_filter_t filter);
 
 
 /**

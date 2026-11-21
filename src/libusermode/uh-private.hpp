@@ -260,6 +260,13 @@ public:
 
     std::map<vmi_pid_t, module_context_t> proc_ntdll;
 
+    // empty: track every process's DLL loads (drakvuf_set_userhook_process_filter)
+    userhook_process_filter_t process_filter;
+    bool tracks_process(drakvuf_t drakvuf, drakvuf_trap_info_t* info) const
+    {
+        return !process_filter || process_filter(drakvuf, info);
+    }
+
     const bool injection_mode;
     int injection_in_progress = 0;
     std::set<std::pair<vmi_pid_t, uint32_t /*tid*/>> pf_in_progress;

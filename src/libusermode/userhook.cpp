@@ -568,6 +568,9 @@ static event_response_t protect_virtual_memory_hook_cb(drakvuf_t drakvuf, drakvu
     if (plugin->is_injection_in_progress(drakvuf, info))
         return VMI_EVENT_RESPONSE_NONE;
 
+    if (!plugin->tracks_process(drakvuf, info))
+        return VMI_EVENT_RESPONSE_NONE;
+
     // IN HANDLE ProcessHandle
     uint64_t process_handle = drakvuf_get_function_argument(drakvuf, info, 1);
     // IN OUT PVOID *BaseAddress
@@ -649,6 +652,9 @@ static event_response_t map_view_of_section_hook_cb(drakvuf_t drakvuf, drakvuf_t
         return VMI_EVENT_RESPONSE_NONE;
 
     if (plugin->is_stopping())
+        return VMI_EVENT_RESPONSE_NONE;
+
+    if (!plugin->tracks_process(drakvuf, info))
         return VMI_EVENT_RESPONSE_NONE;
 
     // IN HANDLE SectionHandle
@@ -982,6 +988,11 @@ bool drakvuf_request_usermode_hook(drakvuf_t drakvuf, const dll_view_t* dll, con
 {
     userhook::get_instance(drakvuf).request_usermode_hook(drakvuf, dll, target, callback, extra);
     return true;
+}
+
+void drakvuf_set_userhook_process_filter(drakvuf_t drakvuf, userhook_process_filter_t filter)
+{
+    userhook::get_instance(drakvuf).process_filter = std::move(filter);
 }
 
 bool drakvuf_stop_userhooks(drakvuf_t drakvuf)
