@@ -440,7 +440,19 @@ static void fill_common_event_trap_info(drakvuf_t drakvuf, drakvuf_trap_info_t* 
     drakvuf_get_process_data_priv(drakvuf, process_base, proc_data);
     proc_data->tid = thread_id;
 
-    if (attached_proc)
+    if (attached_proc && attached_proc == process_base)
+    {
+        /*
+         * The common case: the thread is not attached to another address space, so
+         * the "attached" process is the current one. Its data was read just above;
+         * copy it instead of walking the same EPROCESS (and converting its name)
+         * a second time on every event.
+         */
+        *attached_proc_data = *proc_data;
+        if (proc_data->name)
+            attached_proc_data->name = g_strdup(proc_data->name);
+    }
+    else if (attached_proc)
     {
         drakvuf_get_process_data_priv(drakvuf, attached_proc, attached_proc_data);
         attached_proc_data->tid = thread_id;
