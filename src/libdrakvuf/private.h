@@ -266,6 +266,7 @@ struct drakvuf
     int event_fd_cnt;          // auto-generated for poll()
     fd_info_t fd_info_lookup;  // auto-generated for fast drakvuf_loop lookups
     int poll_rc;
+    unsigned int event_spin_us; // drakvuf_set_event_spin(); 0 = always block in poll()
 
     uint64_t event_counter;    // incremental unique trap event ID
 

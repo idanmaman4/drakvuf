@@ -450,6 +450,15 @@ void drakvuf_remove_trap (drakvuf_t drakvuf,
     drakvuf_trap_free_t free_routine) NOEXCEPT;
 void drakvuf_unhook_trap(drakvuf_t drakvuf, drakvuf_trap_t* trap) NOEXCEPT;
 void drakvuf_loop (drakvuf_t drakvuf, bool (*is_interrupted)(drakvuf_t, void*), void* data) NOEXCEPT;
+/*
+ * Opt-in low-latency event loop. After drakvuf_loop handles a batch of VM events
+ * it keeps polling the vm_event ring (shared memory, no syscall) for up to
+ * @usec microseconds after the last event before blocking in poll() again, so a
+ * guest that is trapping continuously gets its responses without a dom0 wake-up,
+ * event-channel read/unmask and context switch per event. Costs a dom0 CPU while
+ * the guest is busy. 0 (the default) keeps the plain blocking loop.
+ */
+void drakvuf_set_event_spin(drakvuf_t drakvuf, unsigned int usec) NOEXCEPT;
 void drakvuf_interrupt (drakvuf_t drakvuf,
     int sig) NOEXCEPT;
 int drakvuf_is_interrupted(drakvuf_t drakvuf) NOEXCEPT;

@@ -1888,6 +1888,54 @@ static void drakvuf_poll(drakvuf_t drakvuf, unsigned int timeout)
     }
 }
 
+void drakvuf_set_event_spin(drakvuf_t drakvuf, unsigned int usec)
+{
+    drakvuf->event_spin_us = usec;
+}
+
+/*
+ * Keep draining the vm_event ring for up to event_spin_us after the last event.
+ * vmi_are_events_pending() only reads the shared ring indices, and with timeout 0
+ * vmi_events_listen() neither polls nor unmasks the event channel: the port stays
+ * pending, so the next blocking poll() in drakvuf_poll() returns at once and does
+ * the unmask there. No event can be missed by leaving this loop.
+ */
+#define DRAKVUF_SPIN_EPISODE_US 10000
+
+static void drakvuf_spin(drakvuf_t drakvuf, bool (*is_interrupted)(drakvuf_t, void*), void* data)
+{
+    gint64 now = g_get_monotonic_time();
+    gint64 deadline = now + drakvuf->event_spin_us;
+    /* Go back through poll() regularly so every registered fd keeps being serviced */
+    const gint64 episode_end = now + DRAKVUF_SPIN_EPISODE_US;
+
+    while (!is_interrupted(drakvuf, data))
+    {
+        if (vmi_are_events_pending(drakvuf->vmi) > 0)
+        {
+            if (VMI_SUCCESS != vmi_events_listen(drakvuf->vmi, 0))
+            {
+                PRINT_DEBUG("Error processing events while spinning, quitting...\n");
+                drakvuf->interrupted = -1;
+                return;
+            }
+            now = g_get_monotonic_time();
+            if (now >= episode_end)
+                return;
+            deadline = now + drakvuf->event_spin_us;
+            continue;
+        }
+
+        now = g_get_monotonic_time();
+        if (now >= deadline || now >= episode_end)
+            return;
+
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+    }
+}
+
 void drakvuf_loop(drakvuf_t drakvuf, bool (*is_interrupted)(drakvuf_t, void*), void* data)
 {
 
@@ -1897,7 +1945,11 @@ void drakvuf_loop(drakvuf_t drakvuf, bool (*is_interrupted)(drakvuf_t, void*), v
     drakvuf_force_resume(drakvuf);
 
     while (!is_interrupted(drakvuf, data))
+    {
         drakvuf_poll(drakvuf, 1000);
+        if (drakvuf->event_spin_us && drakvuf->poll_rc > 0)
+            drakvuf_spin(drakvuf, is_interrupted, data);
+    }
 
     drakvuf_pause(drakvuf);
 
