@@ -1488,6 +1488,55 @@ bool win_get_process_ppid( drakvuf_t drakvuf, addr_t process_base, vmi_pid_t* pp
     return false;
 }
 
+/*
+ * win_get_process_name(eprocess, fullpath=true), memoised per EPROCESS.
+ *
+ * Only the SeAuditProcessCreationInfo.ImageFileName path is cached: that name is
+ * written once at process creation and never changes. A slot is reused only when
+ * the EPROCESS address, PID, CreateTime and ImageFileName pointer all match, so a
+ * freed-and-reallocated EPROCESS (same address, maybe even a reused PID) misses.
+ * Everything else (no CreateTime offset, ImageFileName not yet set, unreadable
+ * name) takes the uncached path, so the result is identical to the uncached call.
+ * A hit costs two reads instead of a UNICODE_STRING read + UTF-16 conversion.
+ */
+static char* win_get_process_full_name_cached(drakvuf_t drakvuf, addr_t eprocess, vmi_pid_t pid)
+{
+    vmi_instance_t vmi = drakvuf->vmi;
+    addr_t image_file_name = 0;
+    uint64_t create_time = 0;
+
+    if ( !drakvuf->offsets[EPROCESS_CREATETIME] ||
+        VMI_SUCCESS != vmi_read_addr_va(vmi,
+            eprocess + drakvuf->offsets[EPROCESS_PROCCREATIONINFO] + drakvuf->offsets[PROCCREATIONINFO_IMAGEFILENAME],
+            0, &image_file_name) ||
+        !image_file_name ||
+        VMI_SUCCESS != vmi_read_64_va(vmi, eprocess + drakvuf->offsets[EPROCESS_CREATETIME], 0, &create_time) )
+        return win_get_process_name(drakvuf, eprocess, true);
+
+    struct proc_name_cache_entry* e =
+        &drakvuf->proc_name_cache[(eprocess >> 6) & (PROC_NAME_CACHE_SIZE - 1)];
+
+    if ( e->name && e->eprocess == eprocess && e->pid == pid &&
+        e->create_time == create_time && e->image_file_name == image_file_name )
+        return g_strdup(e->name);
+
+    unicode_string_t* fullname = drakvuf_read_unicode_va(drakvuf,
+            image_file_name + drakvuf->offsets[OBJECTNAMEINFORMATION_NAME], 0);
+    char* name = win_get_process_name_impl(fullname, true);
+    vmi_free_unicode_str(fullname);
+
+    if ( !name )
+        return vmi_read_str_va(vmi, eprocess + drakvuf->offsets[EPROCESS_PNAME], 0);
+
+    g_free(e->name);
+    e->eprocess = eprocess;
+    e->pid = pid;
+    e->create_time = create_time;
+    e->image_file_name = image_file_name;
+    e->name = g_strdup(name);
+    return name;
+}
+
 bool win_get_process_data( drakvuf_t drakvuf, addr_t base_addr, proc_data_priv_t* proc_data )
 {
     proc_data->base_addr = base_addr;
@@ -1502,7 +1551,7 @@ bool win_get_process_data( drakvuf_t drakvuf, addr_t base_addr, proc_data_priv_t
                     proc_data->userid = win_get_process_userid( drakvuf, base_addr );
                 else
                     proc_data->userid = 0;
-                proc_data->name   = win_get_process_name( drakvuf, base_addr, true );
+                proc_data->name   = win_get_process_full_name_cached( drakvuf, base_addr, proc_data->pid );
 
                 if ( proc_data->name )
                 {

@@ -230,6 +230,7 @@ static const char* win_offset_names[__WIN_OFFSETS_MAX][2] =
 
     [OBJECT_ATTRIBUTES_OBJECTNAME] = {"_OBJECT_ATTRIBUTES", "ObjectName"},
     [OBJECT_ATTRIBUTES_ROOTDIRECTORY] = {"_OBJECT_ATTRIBUTES", "RootDirectory"},
+    [EPROCESS_CREATETIME] = { "_EPROCESS", "CreateTime" },
 };
 
 static const char* win_bitfields_names[__WIN_OFFSETS_MAX][2] =

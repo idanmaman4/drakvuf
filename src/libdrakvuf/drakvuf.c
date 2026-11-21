@@ -165,6 +165,11 @@ void drakvuf_close(drakvuf_t drakvuf, const bool pause)
 
     g_slist_free(drakvuf->ignored_processes);
     drakvuf->ignored_processes = NULL;
+    for (size_t i = 0; i < PROC_NAME_CACHE_SIZE; i++)
+    {
+        g_free(drakvuf->proc_name_cache[i].name);
+        drakvuf->proc_name_cache[i].name = NULL;
+    }
     g_free(drakvuf->offsets);
     drakvuf->offsets = NULL;
     g_free(drakvuf->bitfields);

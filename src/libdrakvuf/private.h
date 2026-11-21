@@ -149,6 +149,11 @@
  */
 #define MAX_DRAKVUF_VCPU 16
 
+/*
+ * Slots in the per-EPROCESS process-name cache (direct-mapped, power of two).
+ */
+#define PROC_NAME_CACHE_SIZE 64
+
 struct fd_info
 {
     int fd;
@@ -277,6 +282,22 @@ struct drakvuf
     x86_registers_t regs_modified[MAX_DRAKVUF_VCPU];
     GHashTable* injections_in_progress; // key: <pid:tid>
     bool enable_active_callback_check;
+
+    /*
+     * Process full-name cache for the per-event trap info (Windows). Filling
+     * trap_info->proc_data.name otherwise re-reads the guest UNICODE_STRING and
+     * converts it from UTF-16 on every VM event. An entry is only reused when the
+     * EPROCESS address, PID, CreateTime and the ImageFileName pointer all still
+     * match, so a recycled EPROCESS never yields a stale name.
+     */
+    struct proc_name_cache_entry
+    {
+        addr_t eprocess;
+        addr_t image_file_name;
+        uint64_t create_time;
+        vmi_pid_t pid;
+        char* name;
+    } proc_name_cache[PROC_NAME_CACHE_SIZE];
 };
 
 struct breakpoint
