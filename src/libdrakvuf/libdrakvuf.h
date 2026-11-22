@@ -459,6 +459,15 @@ void drakvuf_loop (drakvuf_t drakvuf, bool (*is_interrupted)(drakvuf_t, void*), 
  * the guest is busy. 0 (the default) keeps the plain blocking loop.
  */
 void drakvuf_set_event_spin(drakvuf_t drakvuf, unsigned int usec) NOEXCEPT;
+/*
+ * Keep the breakpoint shadow page of @gfn for the whole session instead of tearing it down
+ * when its last breakpoint is removed (see keep_remap_gfns in private.h); takes effect from
+ * the next breakpoint added on that page. With no breakpoint armed the guest runs on the
+ * shadow copy untrapped, and re-arming re-copies the original frame over it, so mark only
+ * frames the guest never writes and never frees while the session lives -- a loaded kernel
+ * image's code page. At most DRAKVUF_MAX_KEPT_REMAPS (64) gfns; false when the set is full.
+ */
+bool drakvuf_keep_remap_gfn(drakvuf_t drakvuf, addr_t gfn) NOEXCEPT;
 void drakvuf_interrupt (drakvuf_t drakvuf,
     int sig) NOEXCEPT;
 int drakvuf_is_interrupted(drakvuf_t drakvuf) NOEXCEPT;

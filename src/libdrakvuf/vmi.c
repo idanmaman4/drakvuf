@@ -1138,6 +1138,62 @@ static event_response_t io_cb(vmi_instance_t vmi, vmi_event_t* event)
     return rsp;
 }
 
+static bool keeps_remap(drakvuf_t drakvuf, xen_pfn_t gfn)
+{
+    return drakvuf->keep_remap_gfns
+        && g_hash_table_contains(drakvuf->keep_remap_gfns, GSIZE_TO_POINTER(gfn));
+}
+
+/*
+ * Subscribe a kept page's own guard2 next to its first breakpoint's (same gfn r, same access:
+ * no hypercall). r's memaccess wrapper then never empties, so removing breakpoints never
+ * undoes the remap through it. Best effort: on failure the page is simply not kept.
+ */
+static void add_keepers(drakvuf_t drakvuf, struct remapped_gfn* remapped_gfn)
+{
+    drakvuf_trap_t* guard2 = &remapped_gfn->keep_guard2;
+
+    memset(guard2, 0, sizeof(*guard2));
+    guard2->type = MEMACCESS;
+    guard2->name = "keep_remap_guard2";
+    guard2->memaccess.gfn = remapped_gfn->r;
+    guard2->memaccess.access = VMI_MEMACCESS_RWX;
+    guard2->memaccess.type = PRE;
+
+    if ( inject_trap_mem(drakvuf, guard2, 1) )
+        remapped_gfn->keepers = 1;
+}
+
+/*
+ * Drop a kept page's guard on o (altp2m_idx) the way remove_trap(MEMACCESS) does, except
+ * that when it was o's last subscriber the access goes back to "no restriction" with
+ * vmi_set_mem_event -- not vmi_slat_change_gfn(..., ~0), which would undo the o->r remap
+ * and make Xen invalidate the device model's mapcache.
+ */
+static void dormant_guard(drakvuf_t drakvuf, const drakvuf_trap_t* trap)
+{
+    struct wrapper* container = (struct wrapper*)g_hash_table_lookup(drakvuf->memaccess_lookup_trap, trap);
+    if ( !container )
+        return;
+
+    container->traps = g_slist_remove(container->traps, trap);
+    g_hash_table_remove(drakvuf->memaccess_lookup_trap, trap);
+    if ( container->traps )
+    {
+        vmi_mem_access_t update_access = 0;
+        for ( GSList* loop = container->traps; loop; loop = loop->next )
+            update_access |= ((drakvuf_trap_t*)loop->data)->memaccess.access;
+        if ( update_access != container->memaccess.access
+            && VMI_SUCCESS == vmi_set_mem_event(drakvuf->vmi, container->memaccess.gfn, update_access, drakvuf->altp2m_idx) )
+            container->memaccess.access = update_access;
+        return;
+    }
+
+    if ( VMI_FAILURE == vmi_set_mem_event(drakvuf->vmi, container->memaccess.gfn, VMI_MEMACCESS_N, drakvuf->altp2m_idx) )
+        fprintf(stderr, "Failed to clear the guard of kept GFN 0x%lx\n", container->memaccess.gfn);
+    g_hash_table_remove(drakvuf->memaccess_lookup_gfn, GSIZE_TO_POINTER(container->memaccess.gfn));
+}
+
 void remove_trap(drakvuf_t drakvuf,
     const drakvuf_trap_t* trap)
 {
@@ -1196,6 +1252,18 @@ void remove_trap(drakvuf_t drakvuf,
                 {
                     fprintf(stderr, "Critical error in removing int3\n");
                     drakvuf->interrupted = -1;
+                    break;
+                }
+
+                if ( remapped_gfn->keepers )
+                {
+                    /* Kept page: o's guards go dormant, r's stay (keep_guard2, guard4), views stay. */
+                    dormant_guard(drakvuf, &container->breakpoint.guard);
+                    remove_trap(drakvuf, &container->breakpoint.guard2);
+                    if ( !traps_on_gfn
+                        && VMI_FAILURE == vmi_set_mem_event(vmi, container->breakpoint.guard3.memaccess.gfn, VMI_MEMACCESS_N, drakvuf->altp2m_idrx) )
+                        fprintf(stderr, "Failed to clear guard3 of kept GFN 0x%lx\n", current_gfn);
+                    g_hash_table_remove(drakvuf->breakpoint_lookup_pa, GSIZE_TO_POINTER(container->breakpoint.pa));
                     break;
                 }
 
@@ -1451,6 +1519,7 @@ bool inject_trap_pa(drakvuf_t drakvuf,
     /* Let's see if we have already created the shadow copy of this page */
     struct remapped_gfn* remapped_gfn = (struct remapped_gfn*)g_hash_table_lookup(drakvuf->remapped_gfns,
             GSIZE_TO_POINTER(current_gfn));
+    bool created_remap = !remapped_gfn;
 
     if ( !remapped_gfn )
     {
@@ -1479,6 +1548,9 @@ bool inject_trap_pa(drakvuf_t drakvuf,
      * The page may have been remapped previously but if it has no active traps
      * then the contents may be stale, so we copy it in that case just to make sure
      */
+    /* A dormant kept page: still remapped, no breakpoint on it (see keep_remap_gfns). */
+    bool dormant = remapped_gfn->keepers
+        && !g_hash_table_lookup(drakvuf->breakpoint_lookup_gfn, GSIZE_TO_POINTER(remapped_gfn->o));
     if (!g_hash_table_lookup(drakvuf->breakpoint_lookup_gfn, GSIZE_TO_POINTER(remapped_gfn->o)) )
     {
         uint8_t backup[VMI_PS_4KB];
@@ -1587,6 +1659,9 @@ bool inject_trap_pa(drakvuf_t drakvuf,
         goto err_exit;
     }
 
+    if ( !remapped_gfn->keepers && keeps_remap(drakvuf, current_gfn) )
+        add_keepers(drakvuf, remapped_gfn);
+
     /*
      * We don't use inject_trap_mem for guard3 and guard4 because the settings on them are fixed and no external
      * trap can change the memaccess settings for them.
@@ -1596,7 +1671,7 @@ bool inject_trap_pa(drakvuf_t drakvuf,
         PRINT_DEBUG("[IDRX] Failed to create guard3 trap for the breakpoint!\n");
         goto err_exit;
     }
-    if ( VMI_FAILURE == vmi_set_mem_event(drakvuf->vmi, container->breakpoint.guard4.memaccess.gfn, container->breakpoint.guard4.memaccess.access, drakvuf->altp2m_idrx) )
+    if ( !dormant && VMI_FAILURE == vmi_set_mem_event(drakvuf->vmi, container->breakpoint.guard4.memaccess.gfn, container->breakpoint.guard4.memaccess.access, drakvuf->altp2m_idrx) )
     {
         PRINT_DEBUG("[IDRX] Failed to create guard4 trap for the breakpoint!\n");
         goto err_exit;
@@ -1618,7 +1693,7 @@ bool inject_trap_pa(drakvuf_t drakvuf,
 err_exit:
     if ( container->traps )
         g_slist_free(container->traps);
-    if ( remapped_gfn )
+    if ( remapped_gfn && created_remap )
         g_hash_table_remove(drakvuf->remapped_gfns, GSIZE_TO_POINTER(remapped_gfn->o));
     g_slice_free(struct wrapper, container);
     return 0;
@@ -1893,6 +1968,20 @@ void drakvuf_set_event_spin(drakvuf_t drakvuf, unsigned int usec)
     drakvuf->event_spin_us = usec;
 }
 
+bool drakvuf_keep_remap_gfn(drakvuf_t drakvuf, addr_t gfn)
+{
+    bool kept = 0;
+    drakvuf_lock_and_get_vmi(drakvuf);
+    if ( drakvuf->keep_remap_gfns )
+    {
+        kept = g_hash_table_contains(drakvuf->keep_remap_gfns, GSIZE_TO_POINTER(gfn));
+        if ( !kept && g_hash_table_size(drakvuf->keep_remap_gfns) < DRAKVUF_MAX_KEPT_REMAPS )
+            kept = g_hash_table_add(drakvuf->keep_remap_gfns, GSIZE_TO_POINTER(gfn));
+    }
+    drakvuf_release_vmi(drakvuf);
+    return kept;
+}
+
 /*
  * Keep draining the vm_event ring for up to event_spin_us after the last event.
  * vmi_are_events_pending() only reads the shared ring indices, and with timeout 0
@@ -2037,6 +2126,7 @@ bool init_vmi(drakvuf_t drakvuf, bool fast_singlestep)
     drakvuf->memaccess_lookup_gfn = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_wrapper);
     drakvuf->memaccess_lookup_trap = g_hash_table_new(g_direct_hash, g_direct_equal);
     drakvuf->remapped_gfns = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_remapped_gfn);
+    drakvuf->keep_remap_gfns = g_hash_table_new(g_direct_hash, g_direct_equal);
     drakvuf->remove_traps = g_hash_table_new(g_direct_hash, g_direct_equal);
     drakvuf->injections_in_progress = g_hash_table_new(g_direct_hash, g_direct_equal);
 
@@ -2264,6 +2354,12 @@ void close_vmi(drakvuf_t drakvuf)
 
         g_hash_table_destroy(drakvuf->remapped_gfns);
         drakvuf->remapped_gfns = NULL;
+    }
+
+    if (drakvuf->keep_remap_gfns)
+    {
+        g_hash_table_destroy(drakvuf->keep_remap_gfns);
+        drakvuf->keep_remap_gfns = NULL;
     }
 
     if (drakvuf->debug)

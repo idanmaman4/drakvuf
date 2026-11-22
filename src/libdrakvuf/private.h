@@ -240,6 +240,20 @@ struct drakvuf
     GHashTable* remapped_gfns; // Key: gfn
     // val: remapped gfn
 
+    /*
+     * gfns whose shadow (remapped) copy is KEPT when their last breakpoint goes: the caller
+     * vouches the frame is immutable for the session (a kernel image's code page). Tearing a
+     * remap down changes the altp2m views (vmi_slat_change_gfn(..., ~0)), and Xen answers every
+     * such removal with an IOREQ_TYPE_INVALIDATE to the device model; QEMU's handler drains
+     * all block I/O, which deadlocks while an emulated-IDE request is in flight (Windows 7 /
+     * 8.1 guests without PV disk drivers), freezing the guest. A kept page whose last
+     * breakpoint goes turns DORMANT instead: INT3s restored, the guards on its own gfn reset
+     * to no access restriction (nothing traps, so a caller that runs the guest without an
+     * event loop between uses is safe), the views and the guards on the never-mapped shadow
+     * gfn left as they are. Key: gfn. Bounded by DRAKVUF_MAX_KEPT_REMAPS.
+     */
+    GHashTable* keep_remap_gfns;
+
     GHashTable* breakpoint_lookup_pa;   // key: PA of trap
     // val: struct breakpoint
     GHashTable* breakpoint_lookup_gfn;  // key: gfn (size uint64_t)
@@ -335,11 +349,21 @@ struct free_trap_wrapper
     drakvuf_trap_free_t free_routine;
 };
 
+#define DRAKVUF_MAX_KEPT_REMAPS 64
+
 struct remapped_gfn
 {
     xen_pfn_t o;
     xen_pfn_t r;
     bool active;
+    /*
+     * Kept page (keep_remap_gfns): keep_guard2 mirrors a breakpoint's guard2 (r, RWX, in
+     * altp2m_idx) with no callback, holding r's memaccess wrapper so it never empties (which
+     * would undo the remap); guard4 (r in altp2m_idrx) likewise stays armed. The guest never
+     * maps r, so neither ever fires.
+     */
+    bool keepers;
+    drakvuf_trap_t keep_guard2;
 };
 
 void free_remapped_gfn(gpointer p);
